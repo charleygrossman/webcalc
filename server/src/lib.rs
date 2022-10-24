@@ -1,17 +1,172 @@
+use std::io::prelude::*;
 use std::error::Error;
+use std::env;
 use std::fmt;
+use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use uuid::Uuid;
 
-pub struct Job {
+pub struct Server {
+    addr: String,
+    pool: WorkerPool,
+}
+
+impl Server {
+    pub fn new(cfg: ServerConfig) -> Result<Server, ServerError> {
+        let pool = match WorkerPool::new(cfg.pool_size) {
+            Ok(v) => v,
+            Err(v) => return Err(ServerError::new(v.to_string()))
+        };
+        return Ok(Server {
+            addr: format!("{}:{}", cfg.host, cfg.port),
+            pool: pool,
+        });
+    }
+
+    pub fn start(&mut self) -> Result<(), ServerError> {
+        let listener = match TcpListener::bind(self.addr.clone()) {
+            Ok(v) => v,
+            Err(v) => return Err(ServerError::new(format!(
+                "failed to serve on {}: {}", self.addr, v)))
+        };
+        for conn in listener.incoming() {
+            let conn = match conn {
+                Ok(v) => v,
+                Err(v) => return Err(ServerError::new(format!("connection error: {}", v)))
+            };
+            let job = Job::new(Box::new(|| { handle_conn(conn)}));
+            if let Err(e) = self.pool.execute(job) {
+                return Err(ServerError::new(e.to_string()));
+            }
+        }
+        return Ok(());
+    }
+}
+
+fn handle_conn(mut conn: TcpStream) {
+    const GET_REQ: &[u8] = b"GET / HTTP/1.1\r\n";
+    const OK_RESP: &str = "<!DOCTYPE html><html lang=\"en\"><head>
+        <meta charset=\"utf-8\"><title>ok</title></head><body>
+        <h1>ok</h1></body></html>";
+    const NOT_FOUND_RESP: &str = "<!DOCTYPE html><html lang=\"en\"><head>
+        <meta charset=\"utf-8\"><title>not found</title></head><body>
+        <h1>not found</h1></body></html>";
+
+    let resp: String;
+    let mut buf = [0; 1024];
+    conn.read(&mut buf).unwrap();
+    if buf.starts_with(GET_REQ) {
+        resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+            OK_RESP.len(), OK_RESP,
+        ); 
+    } else {
+        resp = format!(
+            "HTTP/1.1 404 NOT FOUND\r\nContent-Length: {}\r\n\r\n{}",
+            NOT_FOUND_RESP.len(), NOT_FOUND_RESP,
+        );
+    }
+    conn.write(resp.as_bytes()).unwrap();
+    conn.flush().unwrap();
+}
+
+#[derive(Debug)]
+pub struct ServerError {
+    msg: String,
+}
+
+impl ServerError {
+    pub fn new(msg: String) -> ServerError {
+        return ServerError { msg };
+    }
+}
+
+impl fmt::Display for ServerError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        return write!(f, "server error: {}", self.msg);
+    }
+}
+
+impl Error for ServerError {
+    fn description(&self) -> &str {
+        return &self.msg;
+    }
+}
+
+pub struct ServerConfig {
+    pub host: String,
+    pub port: String,
+    pub pool_size: usize,
+}
+
+impl ServerConfig {
+    pub fn new(mut args: env::Args) -> Result<ServerConfig, ServerConfigError> {
+        args.next();
+        let host = match args.next() {
+            Some(v) => v,
+            None => return Err(ServerConfigError::new(String::from("failed to get host argument"))),
+        };
+        let port = match args.next() {
+            Some(v) => v,
+            None => return Err(ServerConfigError::new(String::from("failed to get port argument"))),
+        };
+        let pool_size = match args.next() {
+            Some(v) => v,
+            None => return Err(ServerConfigError::new(String::from("failed to get pool size argument"))),
+        };
+        let size: usize = match pool_size.trim().parse() {
+            Ok(v) => v,
+            Err(v) => return Err(ServerConfigError::new(format!(
+                "failed to parse pool size as usize: got={} error={}",
+                pool_size, v
+            ))),
+        };
+        if size < WORKER_POOL_MIN_SIZE || size > WORKER_POOL_MAX_SIZE {
+            return Err(ServerConfigError::new(format!(
+                "invalid pool size: min={} max={} got={}",
+                WORKER_POOL_MIN_SIZE, WORKER_POOL_MAX_SIZE, size
+            )));
+        }
+        return Ok(ServerConfig {
+            host: host,
+            port: port,
+            pool_size: size,
+        });
+    }
+}
+
+#[derive(Debug)]
+pub struct ServerConfigError {
+    msg: String,
+}
+
+impl ServerConfigError {
+    pub fn new(msg: String) -> ServerConfigError {
+        return ServerConfigError { msg };
+    }
+}
+
+impl fmt::Display for ServerConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        return write!(f, "failed to initialize server config: {}", self.msg);
+    }
+}
+
+impl Error for ServerConfigError {
+    fn description(&self) -> &str {
+        return &self.msg;
+    }
+}
+
+struct Job {
     id: Uuid,
     do_fn: Box<dyn FnOnce() + Send + 'static>,
 }
 
 impl Job {
-    pub fn new(do_fn: Box<dyn FnOnce() + Send + 'static>) -> Job {
+    fn new(do_fn: Box<dyn FnOnce() + Send + 'static>) -> Job {
         return Job {
             id: Uuid::new_v4(),
             do_fn: do_fn,
@@ -24,26 +179,18 @@ enum JobMessage {
     Terminate,
 }
 
-pub const WORKER_POOL_MIN_SIZE: usize = 1;
-pub const WORKER_POOL_MAX_SIZE: usize = 16;
+const WORKER_POOL_MIN_SIZE: usize = 1;
+const WORKER_POOL_MAX_SIZE: usize = 16;
 
-pub struct WorkerPool {
+struct WorkerPool {
     workers: Vec<Worker>,
     job_send: mpsc::Sender<JobMessage>,
 }
 
 impl WorkerPool {
-    pub fn new(size: usize) -> Result<WorkerPool, WorkerPoolNewError> {
-        if size < WORKER_POOL_MIN_SIZE || size > WORKER_POOL_MAX_SIZE {
-            return Err(WorkerPoolNewError::new(format!(
-                "invalid size: min={} max={} got={}",
-                WORKER_POOL_MIN_SIZE, WORKER_POOL_MAX_SIZE, size
-            )));
-        }
-
+    fn new(size: usize) -> Result<WorkerPool, WorkerPoolNewError> {
         let (send, recv) = mpsc::channel();
         let recv = Arc::new(Mutex::new(recv));
-
         let mut result = WorkerPool {
             workers: Vec::with_capacity(size),
             job_send: send,
@@ -58,7 +205,7 @@ impl WorkerPool {
         return Ok(result);
     }
 
-    pub fn execute(&self, job: Job) -> Result<(), WorkerPoolExecuteError> {
+    fn execute(&self, job: Job) -> Result<(), WorkerPoolExecuteError> {
         let job_id = job.id;
         if let Err(e) = self.job_send.send(JobMessage::NewJob(job)) {
             return Err(WorkerPoolExecuteError::new(format!(
