@@ -46,7 +46,7 @@ impl Server {
 }
 
 fn handle_conn(mut conn: TcpStream) {
-    const GET_REQ: &[u8] = b"GET / HTTP/1.1\r\n";
+    const POST_REQ: &[u8] = b"POST / HTTP/1.1\r\n";
     const OK_RESP: &str = "<!DOCTYPE html><html lang=\"en\"><head>
         <meta charset=\"utf-8\"><title>ok</title></head><body>
         <h1>ok</h1></body></html>";
@@ -57,7 +57,7 @@ fn handle_conn(mut conn: TcpStream) {
     let resp: String;
     let mut buf = [0; 1024];
     conn.read(&mut buf).unwrap();
-    if buf.starts_with(GET_REQ) {
+    if buf.starts_with(POST_REQ) {
         resp = format!(
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
             OK_RESP.len(), OK_RESP,
@@ -300,5 +300,69 @@ impl Worker {
             }
         })?;
         return Ok(Worker { id: id, thread: Some(t) });
+    }
+}
+
+const OPERATOR_ADD: &str = "add";
+const OPERATOR_SUB: &str = "sub";
+
+enum Operator {
+    Add(String),
+    Sub(String),
+}
+
+struct Calculation {
+    operator: Operator,
+    operands: Vec<f64>,
+}
+
+impl Calculation {
+    fn parse(s: &str) -> Result<Calculation, CalculationParseError> {
+        let mut tokens = s.trim().split(",");
+        let operator = match tokens.next() {
+            Some(v) => {
+                let v = v.trim().to_lowercase();
+                match v.as_str() {
+                    OPERATOR_ADD => Operator::Add(v),
+                    OPERATOR_SUB => Operator::Sub(v),
+                    _ => return Err(CalculationParseError::new(format!("unknown operator: {}", s)))
+                }
+            },
+            None => {
+                return Err(CalculationParseError::new(format!("missing operator: {}", s)))
+            },
+        };
+        let mut operands = Vec::new();
+        for t in tokens {
+            let v: f64 = match t.trim().parse() {
+                Ok(v) => v,
+                Err(v) => return Err(CalculationParseError::new(format!("{}: {}", v, s)))
+            };
+            operands.push(v);
+        }
+        return Ok(Calculation{operator, operands});
+    }
+}
+
+#[derive(Debug)]
+pub struct CalculationParseError {
+    msg: String,
+}
+
+impl CalculationParseError {
+    pub fn new(msg: String) -> CalculationParseError {
+        return CalculationParseError { msg };
+    }
+}
+
+impl fmt::Display for CalculationParseError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        return write!(f, "failed to parse calculation: {}", self.msg);
+    }
+}
+
+impl Error for CalculationParseError {
+    fn description(&self) -> &str {
+        return &self.msg;
     }
 }
