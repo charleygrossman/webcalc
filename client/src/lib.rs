@@ -69,7 +69,7 @@ impl Client {
             },
         };
         let operands: Vec<& str> = tokens.collect();
-        let content = format!("operator={}&operands={:?}", operator, operands);
+        let content = format!("operator={}&operands={}", operator, operands.join(","));
         return Ok(format!(
                 "POST / HTTP/1.1\r\n
                 Content-Type: application/x-www-form-urlencoded\r\n

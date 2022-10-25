@@ -7,6 +7,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use uuid::Uuid;
+use regex::Regex;
 
 pub struct Server {
     addr: String,
@@ -36,7 +37,7 @@ impl Server {
                 Ok(v) => v,
                 Err(v) => return Err(ServerError::new(format!("connection error: {}", v)))
             };
-            let job = Job::new(Box::new(|| { handle_conn(conn)}));
+            let job = Job::new(Box::new(|| { handle(conn)}));
             if let Err(e) = self.pool.execute(job) {
                 return Err(ServerError::new(e.to_string()));
             }
@@ -45,28 +46,30 @@ impl Server {
     }
 }
 
-fn handle_conn(mut conn: TcpStream) {
-    const POST_REQ: &[u8] = b"POST / HTTP/1.1\r\n";
-    const OK_RESP: &str = "<!DOCTYPE html><html lang=\"en\"><head>
-        <meta charset=\"utf-8\"><title>ok</title></head><body>
-        <h1>ok</h1></body></html>";
-    const NOT_FOUND_RESP: &str = "<!DOCTYPE html><html lang=\"en\"><head>
-        <meta charset=\"utf-8\"><title>not found</title></head><body>
-        <h1>not found</h1></body></html>";
+fn handle(mut conn: TcpStream) {
+    const POST_PREFIX: &str = "POST / HTTP/1.1";
+    const BAD_REQ_RESP: &str = "HTTP/1.1 400 BAD REQUEST\r\n";
 
-    let resp: String;
     let mut buf = [0; 1024];
-    conn.read(&mut buf).unwrap();
-    if buf.starts_with(POST_REQ) {
-        resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
-            OK_RESP.len(), OK_RESP,
-        ); 
+    let n = conn.read(&mut buf).unwrap();
+    let req = String::from_utf8_lossy(&buf[..n]);
+    let resp: String;
+    if req.starts_with(POST_PREFIX) {
+        let r = Regex::new(r"(?s)operator=(.*)&operands=(.*)").unwrap();
+        let c = r.captures(req.trim()).unwrap();
+        let operator = c.get(1).map_or("", |v| v.as_str());
+        let operands = c.get(2).map_or("", |v| v.as_str());
+        let calc = Calculation::parse(operator, operands).unwrap();
+        let result: Option<f64> = match calc.operator {
+            Operator::Add => calc.operands.into_iter().reduce(|a, b| a + b),
+            Operator::Sub => calc.operands.into_iter().reduce(|a, b| a - b),
+        };
+        resp = match result {
+            Some(v) => v.to_string(),
+            None => String::from(""),
+        }
     } else {
-        resp = format!(
-            "HTTP/1.1 404 NOT FOUND\r\nContent-Length: {}\r\n\r\n{}",
-            NOT_FOUND_RESP.len(), NOT_FOUND_RESP,
-        );
+        resp = String::from(BAD_REQ_RESP);
     }
     conn.write(resp.as_bytes()).unwrap();
     conn.flush().unwrap();
@@ -306,9 +309,10 @@ impl Worker {
 const OPERATOR_ADD: &str = "add";
 const OPERATOR_SUB: &str = "sub";
 
+#[derive(Debug)]
 enum Operator {
-    Add(String),
-    Sub(String),
+    Add,
+    Sub,
 }
 
 struct Calculation {
@@ -317,30 +321,24 @@ struct Calculation {
 }
 
 impl Calculation {
-    fn parse(s: &str) -> Result<Calculation, CalculationParseError> {
-        let mut tokens = s.trim().split(",");
-        let operator = match tokens.next() {
-            Some(v) => {
-                let v = v.trim().to_lowercase();
-                match v.as_str() {
-                    OPERATOR_ADD => Operator::Add(v),
-                    OPERATOR_SUB => Operator::Sub(v),
-                    _ => return Err(CalculationParseError::new(format!("unknown operator: {}", s)))
-                }
-            },
-            None => {
-                return Err(CalculationParseError::new(format!("missing operator: {}", s)))
-            },
+    fn parse(operator: &str, operands: &str) -> Result<Calculation, CalculationParseError> {
+        let operator = match operator.trim().to_lowercase().as_str() {
+            OPERATOR_ADD => Operator::Add,
+            OPERATOR_SUB => Operator::Sub,
+            _ => return Err(CalculationParseError::new(format!("unknown operator: {}", operator)))
         };
-        let mut operands = Vec::new();
-        for t in tokens {
+        let mut ops = Vec::new();
+        for t in operands.trim().split(",") {
             let v: f64 = match t.trim().parse() {
                 Ok(v) => v,
-                Err(v) => return Err(CalculationParseError::new(format!("{}: {}", v, s)))
+                Err(v) => return Err(CalculationParseError::new(format!("{}: {}", v, operands)))
             };
-            operands.push(v);
+            ops.push(v);
         }
-        return Ok(Calculation{operator, operands});
+        return Ok(Calculation{
+            operator: operator,
+            operands: ops,
+        });
     }
 }
 
