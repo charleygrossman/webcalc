@@ -37,7 +37,7 @@ impl Server {
                 Ok(v) => v,
                 Err(v) => return Err(ServerError::new(format!("connection error: {}", v)))
             };
-            let job = Job::new(Box::new(|| { handle(conn)}));
+            let job = Job::new(Box::new(|| { handle(conn) }));
             if let Err(e) = self.pool.execute(job) {
                 return Err(ServerError::new(e.to_string()));
             }
@@ -53,8 +53,11 @@ fn handle(mut conn: TcpStream) {
     let mut buf = [0; 1024];
     let n = conn.read(&mut buf).unwrap();
     let req = String::from_utf8_lossy(&buf[..n]);
+
     let resp: String;
-    if req.starts_with(POST_PREFIX) {
+    if !req.starts_with(POST_PREFIX) {
+        resp = String::from(BAD_REQ_RESP);
+    } else {
         let r = Regex::new(r"(?s)operator=(.*)&operands=(.*)").unwrap();
         let c = r.captures(req.trim()).unwrap();
         let operator = c.get(1).map_or("", |v| v.as_str());
@@ -63,13 +66,14 @@ fn handle(mut conn: TcpStream) {
         let result: Option<f64> = match calc.operator {
             Operator::Add => calc.operands.into_iter().reduce(|a, b| a + b),
             Operator::Sub => calc.operands.into_iter().reduce(|a, b| a - b),
+            Operator::Mul => calc.operands.into_iter().reduce(|a, b| a * b),
+            Operator::Div => calc.operands.into_iter().reduce(|a, b| a / b),
+            Operator::Rem => calc.operands.into_iter().reduce(|a, b| a % b),
         };
         resp = match result {
             Some(v) => v.to_string(),
-            None => String::from(""),
-        }
-    } else {
-        resp = String::from(BAD_REQ_RESP);
+            None => String::from("nan"),
+        };
     }
     conn.write(resp.as_bytes()).unwrap();
     conn.flush().unwrap();
@@ -308,11 +312,17 @@ impl Worker {
 
 const OPERATOR_ADD: &str = "add";
 const OPERATOR_SUB: &str = "sub";
+const OPERATOR_MUL: &str = "mul";
+const OPERATOR_DIV: &str = "div";
+const OPERATOR_REM: &str = "rem";
 
 #[derive(Debug)]
 enum Operator {
     Add,
     Sub,
+    Mul,
+    Div,
+    Rem,
 }
 
 struct Calculation {
@@ -325,6 +335,9 @@ impl Calculation {
         let operator = match operator.trim().to_lowercase().as_str() {
             OPERATOR_ADD => Operator::Add,
             OPERATOR_SUB => Operator::Sub,
+            OPERATOR_MUL => Operator::Mul,
+            OPERATOR_DIV => Operator::Div,
+            OPERATOR_REM => Operator::Rem,
             _ => return Err(CalculationParseError::new(format!("unknown operator: {}", operator)))
         };
         let mut ops = Vec::new();

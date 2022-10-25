@@ -17,7 +17,7 @@ impl Client {
             Ok(v) => v,
             Err(v) => return Err(ClientNewError::new(v.to_string()))
         };
-        let outfile = match File::open(cfg.outpath) {
+        let outfile = match File::create(cfg.outpath) {
             Ok(v) => v,
             Err(v) => return Err(ClientNewError::new(v.to_string()))
         };
@@ -38,7 +38,6 @@ impl Client {
                 Ok(v) => v,
                 Err(v) => return Err(ClientCalculateError::new(format!("{}: {}", v, &line)))
             };
-            println!("REQ: {}", req.clone());
             let mut conn = match TcpStream::connect(self.server_addr.clone()) {
                 Ok(v) => v,
                 Err(v) => {
@@ -51,11 +50,16 @@ impl Client {
             if let Err(e) = conn.flush() {
                 return Err(ClientCalculateError::new(e.to_string()))
             }
+
             let mut buf = [0; 1024];
-            if let Err(e) = conn.read(&mut buf) {
+            let n = match conn.read(&mut buf) {
+                Ok(v) => v,
+                Err(v) => return Err(ClientCalculateError::new(v.to_string())),
+            };
+            let resp = String::from_utf8_lossy(&buf[..n]);
+            if let Err(e) = writeln!(&mut self.outfile, "in={} out={}", &line, resp) {
                 return Err(ClientCalculateError::new(e.to_string()))
             }
-            println!("RESP: {}", String::from_utf8_lossy(&buf[..]));
         }
         return Ok(());
     }
@@ -68,7 +72,7 @@ impl Client {
                 return Err("missing operator");
             },
         };
-        let operands: Vec<& str> = tokens.collect();
+        let operands: Vec<&str> = tokens.collect();
         let content = format!("operator={}&operands={}", operator, operands.join(","));
         return Ok(format!(
                 "POST / HTTP/1.1\r\n
