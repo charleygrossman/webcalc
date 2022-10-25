@@ -198,7 +198,7 @@ impl WorkerPool {
     fn new(size: usize) -> Result<WorkerPool, WorkerPoolNewError> {
         let (send, recv) = mpsc::channel();
         let recv = Arc::new(Mutex::new(recv));
-        let mut result = WorkerPool {
+        let mut pool = WorkerPool {
             workers: Vec::with_capacity(size),
             job_send: send,
         };
@@ -207,19 +207,16 @@ impl WorkerPool {
                 Ok(w) => w,
                 Err(w) => return Err(WorkerPoolNewError::new(w.to_string())),
             };
-            result.workers.push(w);
+            pool.workers.push(w);
         }
-        return Ok(result);
+        return Ok(pool);
     }
 
     fn execute(&self, job: Job) -> Result<(), WorkerPoolExecuteError> {
         let job_id = job.id;
         if let Err(e) = self.job_send.send(JobMessage::NewJob(job)) {
             return Err(WorkerPoolExecuteError::new(format!(
-                "job_id={} err={}",
-                job_id,
-                e.to_string()
-            )));
+                "job_id={} err={}", job_id, e.to_string())));
         }
         return Ok(());
     }
